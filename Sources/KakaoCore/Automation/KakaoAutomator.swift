@@ -10,12 +10,16 @@ public final class KakaoAutomator {
 
     /// Send a message to a chat by navigating the UI.
     public func sendMessage(to chatName: String, message: String, selfChat: Bool = false) throws {
-        // 1. Ensure KakaoTalk is running and logged in
-        let stateBefore = AppLifecycle.detectState()
-        try AppLifecycle.ensureReady(credentials: CredentialStore())
-        if stateBefore != .loggedIn {
-            Thread.sleep(forTimeInterval: 2.0)
+        let sendStart = Date()
+        func stage(_ name: String) {
+            fputs("[kakaocli] stage=\(name) elapsed=\(String(format: "%.2f", Date().timeIntervalSince(sendStart)))s\n", stderr)
         }
+        // 1. Ensure KakaoTalk is running and logged in.
+        // NOTE: do NOT call detectState() here as well as inside
+        // ensureReady() — that duplicated a full state detection
+        // (previously ~46s each) on every send.
+        try AppLifecycle.ensureReady(credentials: CredentialStore())
+        stage("ensureReady")
 
         // 2. Activate KakaoTalk and get windows
         try AXHelpers.activateApp(bundleId: Self.bundleId)
@@ -34,10 +38,19 @@ public final class KakaoAutomator {
             Thread.sleep(forTimeInterval: 0.3)
         }
 
-        // 4. Ensure we're on the Chats tab
-        if let chatroomsTab = AXHelpers.findFirst(mainWindow, role: "AXCheckBox", identifier: "chatrooms") {
-            _ = AXHelpers.performAction(chatroomsTab, kAXPressAction as String)
-            Thread.sleep(forTimeInterval: 0.3)
+        // 4. Ensure we're on the Chats tab.
+        // If the chat-list table is already present we ARE on the Chats tab:
+        // skip the tab search entirely. Searching for the "chatrooms"
+        // checkbox with findFirst walks the AX tree and, even bounded to
+        // depth 5, descends into the 500+ row table — that cost 41.1s in
+        // the 2026-10-19 stage timings (activate+window+tab stage).
+        // Only search for (and press) the tab when no table is present,
+        // in which case the tree being searched has no table to walk.
+        if AXHelpers.chatListTable(mainWindow) == nil {
+            if let chatroomsTab = AXHelpers.findFirst(mainWindow, role: "AXCheckBox", identifier: "chatrooms", maxDepth: 5) {
+                _ = AXHelpers.performAction(chatroomsTab, kAXPressAction as String)
+                Thread.sleep(forTimeInterval: 0.3)
+            }
         }
 
         // 5. Find the chat row in the list
@@ -45,6 +58,7 @@ public final class KakaoAutomator {
             throw AutomationError.chatNotFound(chatName)
         }
 
+        stage("activate+window+tab")
         let row: AXUIElement
         if selfChat {
             guard let selfRow = AXHelpers.findSelfChatRow(table) else {
@@ -58,6 +72,7 @@ public final class KakaoAutomator {
             row = chatRow
         }
 
+        stage("findRow")
         // 6. Open the chat via AX row selection + Enter (works even when off-screen).
         //    Falls back to scroll-into-view + double-click if selection fails.
         var opened = false
@@ -85,6 +100,7 @@ public final class KakaoAutomator {
             chatWindow = updatedWindows.first(where: { AXHelpers.identifier($0) != "Main Window" })
             if chatWindow != nil { break }
         }
+        stage("openChatWindow")
         guard let chatWindow else {
             throw AutomationError.inputFieldNotFound
         }
@@ -111,9 +127,11 @@ public final class KakaoAutomator {
             AXHelpers.pressKey(keyCode: 36) // Return key
         }
 
+        stage("typed+enter")
         // 10. Close the chat window
         Thread.sleep(forTimeInterval: 0.3)
         _ = AXHelpers.closeWindow(chatWindow)
+        stage("done")
     }
 
     /// Find the message input AXTextArea in a chat window.

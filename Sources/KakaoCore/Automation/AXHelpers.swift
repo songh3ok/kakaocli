@@ -29,6 +29,21 @@ public enum AXHelpers {
         return value as? String
     }
 
+    /// Fetch several string attributes in ONE AX IPC call.
+    /// Each AXUIElementCopyAttributeValue is a mach_msg round-trip to
+    /// KakaoTalk (~ms each); fetching role/title/value/etc. separately
+    /// for thousands of tree nodes was a major send/login slowdown.
+    public static func stringAttributes(_ element: AXUIElement, _ attrs: [String]) -> [String: String] {
+        var values: CFArray?
+        let err = AXUIElementCopyMultipleAttributeValues(element, attrs as CFArray, [], &values)
+        guard err == .success, let values = values as? [AnyObject] else { return [:] }
+        var out: [String: String] = [:]
+        for (i, attr) in attrs.enumerated() where i < values.count {
+            if let s = values[i] as? String { out[attr] = s }
+        }
+        return out
+    }
+
     /// Get an integer attribute from an AXUIElement.
     public static func intAttribute(_ element: AXUIElement, _ attr: String) -> Int? {
         var value: AnyObject?
@@ -156,8 +171,9 @@ public enum AXHelpers {
     /// Find the first element matching a role and containing text.
     public static func findFirst(_ element: AXUIElement, role targetRole: String, text: String, maxDepth: Int = 10, currentDepth: Int = 0) -> AXUIElement? {
         guard currentDepth <= maxDepth else { return nil }
-        if role(element) == targetRole {
-            let t = title(element) ?? value(element) ?? ""
+        let attrs = stringAttributes(element, [kAXRoleAttribute as String, kAXTitleAttribute as String, kAXValueAttribute as String])
+        if attrs[kAXRoleAttribute as String] == targetRole {
+            let t = attrs[kAXTitleAttribute as String] ?? attrs[kAXValueAttribute as String] ?? ""
             if t.localizedCaseInsensitiveContains(text) {
                 return element
             }
@@ -173,8 +189,9 @@ public enum AXHelpers {
     /// Find the first element matching a role and identifier.
     public static func findFirst(_ element: AXUIElement, role targetRole: String, identifier targetId: String, maxDepth: Int = 10, currentDepth: Int = 0) -> AXUIElement? {
         guard currentDepth <= maxDepth else { return nil }
-        if role(element) == targetRole {
-            if identifier(element) == targetId {
+        let attrs = stringAttributes(element, [kAXRoleAttribute as String, kAXIdentifierAttribute as String])
+        if attrs[kAXRoleAttribute as String] == targetRole {
+            if attrs[kAXIdentifierAttribute as String] == targetId {
                 return element
             }
         }
@@ -189,40 +206,51 @@ public enum AXHelpers {
     /// Find the AXRow in a chat list whose name label matches the given text.
     /// KakaoTalk chat list: AXTable > AXRow > AXCell > AXStaticText(id="_NS:18")
     public static func findChatRow(_ table: AXUIElement, chatName: String, exact: Bool = false) -> AXUIElement? {
+        let start = Date()
+        var scanned = 0
         for row in children(table) {
+            scanned += 1
             guard role(row) == "AXRow" else { continue }
             for cell in children(row) {
                 guard role(cell) == "AXCell" else { continue }
                 for child in children(cell) {
-                    if role(child) == "AXStaticText" && identifier(child) == "_NS:18" {
-                        let name = value(child) ?? ""
+                    let attrs = stringAttributes(child, [kAXRoleAttribute as String, kAXIdentifierAttribute as String, kAXValueAttribute as String])
+                    if attrs[kAXRoleAttribute as String] == "AXStaticText" && attrs[kAXIdentifierAttribute as String] == "_NS:18" {
+                        let name = attrs[kAXValueAttribute as String] ?? ""
                         let matches = exact ? name == chatName : name.localizedCaseInsensitiveContains(chatName)
                         if matches {
+                            fputs("[kakaocli] findChatRow: found after scanning \(scanned) rows in \(String(format: "%.2f", Date().timeIntervalSince(start)))s\n", stderr)
                             return row
                         }
                     }
                 }
             }
         }
+        fputs("[kakaocli] findChatRow: NOT found after scanning \(scanned) rows in \(String(format: "%.2f", Date().timeIntervalSince(start)))s\n", stderr)
         return nil
     }
 
     /// Find the self-chat row (identified by "badge me" image in the cell).
     public static func findSelfChatRow(_ table: AXUIElement) -> AXUIElement? {
+        let start = Date()
+        var scanned = 0
         for row in children(table) {
+            scanned += 1
             guard role(row) == "AXRow" else { continue }
             for cell in children(row) {
                 guard role(cell) == "AXCell" else { continue }
                 for child in children(cell) {
-                    if role(child) == "AXImage" {
-                        let desc = description(child) ?? ""
-                        if desc.contains("badge me") {
+                    let attrs = stringAttributes(child, [kAXRoleAttribute as String, kAXDescriptionAttribute as String])
+                    if attrs[kAXRoleAttribute as String] == "AXImage" {
+                        if (attrs[kAXDescriptionAttribute as String] ?? "").contains("badge me") {
+                            fputs("[kakaocli] findSelfChatRow: found after scanning \(scanned) rows in \(String(format: "%.2f", Date().timeIntervalSince(start)))s\n", stderr)
                             return row
                         }
                     }
                 }
             }
         }
+        fputs("[kakaocli] findSelfChatRow: NOT found after scanning \(scanned) rows in \(String(format: "%.2f", Date().timeIntervalSince(start)))s\n", stderr)
         return nil
     }
 

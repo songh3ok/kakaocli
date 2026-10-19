@@ -85,11 +85,20 @@ public enum AppLifecycle {
             if title.lowercased().contains("log in") || title == "로그인" {
                 return .loginScreen
             }
-            if AXHelpers.findFirst(window, role: "AXImage", identifier: "Logo") != nil {
-                return .loginScreen
-            }
+            // FAST PATH: chatListTable is a cheap direct-children check.
+            // It MUST come before the Logo search: findFirst is a recursive
+            // DFS over the whole window, and a logged-in main window contains
+            // a chat table with hundreds of rows, so searching for the login
+            // Logo first took ~46s per detectState() call (sample-verified:
+            // AppLifecycle.swift classifyWindow -> AXHelpers.findFirst ->
+            // AXUIElementCopyAttributeValue/mach_msg over every row).
+            // The login window has no chat table, so the Logo DFS below is
+            // only ever run over the small login UI tree.
             if AXHelpers.chatListTable(window) != nil {
                 return .loggedIn
+            }
+            if AXHelpers.findFirst(window, role: "AXImage", identifier: "Logo", maxDepth: 6) != nil {
+                return .loginScreen
             }
             return .loggedIn
         }
