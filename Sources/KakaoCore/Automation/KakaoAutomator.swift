@@ -53,6 +53,40 @@ public final class KakaoAutomator {
             }
         }
 
+        // 4b. Fast path: use the Chats-tab search to filter the list first,
+        // so findChatRow scans a handful of rows instead of 500+.
+        // Query = first name token; correctness does NOT rely on the query:
+        // findChatRow still requires substring / all-token unique match.
+        var searchField: AXUIElement? = nil
+        if !selfChat {
+            var existingField = AXHelpers.findFirstByRoles(mainWindow, roles: ["AXTextField", "AXSearchField"], maxDepth: 4)
+            if existingField == nil, let btn = AXHelpers.findFirstByDescription(mainWindow, desc: "검색", maxDepth: 3) {
+                _ = AXHelpers.performAction(btn, kAXPressAction as String)
+                _ = AXHelpers.poll(timeout: 1.5) {
+                    existingField = AXHelpers.findFirstByRoles(mainWindow, roles: ["AXTextField", "AXSearchField"], maxDepth: 4)
+                    return existingField != nil
+                }
+            }
+            if let field = existingField {
+                searchField = field
+                let query = chatName.split(separator: ",").first.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? chatName
+                _ = AXHelpers.focus(field)
+                if !AXHelpers.setValue(field, String(query)) {
+                    AXHelpers.clickElement(field)
+                    AXHelpers.typeText(String(query))
+                }
+                // Poll cheaply (one AX call for row count) until the list is
+                // filtered (<200 rows) instead of a fixed wait; timeout is a
+                // safe fallback - findChatRow correctness is unaffected.
+                if let tbl = AXHelpers.chatListTable(mainWindow) {
+                    _ = AXHelpers.poll(timeout: 1.2) { AXHelpers.children(tbl).count < 200 }
+                } else {
+                    Thread.sleep(forTimeInterval: 0.2)
+                }
+                stage("searchFilter")
+            }
+        }
+
         // 5. Find the chat row in the list
         guard let table = AXHelpers.chatListTable(mainWindow) else {
             throw AutomationError.chatNotFound(chatName)
@@ -77,11 +111,11 @@ public final class KakaoAutomator {
         //    Falls back to scroll-into-view + double-click if selection fails.
         var opened = false
         if AXHelpers.selectRow(row, in: table) {
-            Thread.sleep(forTimeInterval: 0.2)
+            Thread.sleep(forTimeInterval: 0.05)
             AXHelpers.pressKey(keyCode: 36) // Enter to open
-            Thread.sleep(forTimeInterval: 0.5)
-            let checkWindows = AXHelpers.windows(app)
-            opened = checkWindows.contains { AXHelpers.identifier($0) != "Main Window" }
+            opened = AXHelpers.poll(timeout: 1.5) {
+                AXHelpers.windows(app).contains { AXHelpers.identifier($0) != "Main Window" }
+            }
         }
         if !opened {
             if let scrollArea = AXHelpers.chatListScrollArea(mainWindow) {
@@ -95,7 +129,7 @@ public final class KakaoAutomator {
         var chatWindow: AXUIElement?
         let windowDeadline = Date().addingTimeInterval(5.0)
         while Date() < windowDeadline {
-            Thread.sleep(forTimeInterval: 0.5)
+            Thread.sleep(forTimeInterval: 0.1)
             let updatedWindows = AXHelpers.windows(app)
             chatWindow = updatedWindows.first(where: { AXHelpers.identifier($0) != "Main Window" })
             if chatWindow != nil { break }
@@ -112,12 +146,15 @@ public final class KakaoAutomator {
 
         // 9. Focus and type the message
         _ = AXHelpers.performAction(chatWindow, kAXRaiseAction as String)
-        Thread.sleep(forTimeInterval: 0.3)
+        Thread.sleep(forTimeInterval: 0.1)
         AXHelpers.clickElement(inputField)
-        Thread.sleep(forTimeInterval: 0.3)
+        // Proceed as soon as the input reports focus (fallback: short wait).
+        if !AXHelpers.poll(timeout: 0.5, { AXHelpers.boolAttribute(inputField, kAXFocusedAttribute as String) == true }) {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
 
         if AXHelpers.setValue(inputField, message) {
-            Thread.sleep(forTimeInterval: 0.2)
+            Thread.sleep(forTimeInterval: 0.05)
             AXHelpers.pressKey(keyCode: 36) // Return key
         } else {
             _ = AXHelpers.focus(inputField)
@@ -131,6 +168,7 @@ public final class KakaoAutomator {
         // 10. Close the chat window
         Thread.sleep(forTimeInterval: 0.3)
         _ = AXHelpers.closeWindow(chatWindow)
+        if let sf = searchField { _ = AXHelpers.setValue(sf, "") }
         stage("done")
     }
 

@@ -203,11 +203,64 @@ public enum AXHelpers {
         return nil
     }
 
+    /// Poll `condition` every `interval` until true or `timeout`; early-exits as soon as ready.
+    public static func poll(timeout: TimeInterval, interval: TimeInterval = 0.05, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if condition() { return true }
+            if Date() >= deadline { return condition() }
+            Thread.sleep(forTimeInterval: interval)
+        }
+    }
+
+    /// DFS first element whose role is in `roles` (early exit, children in order).
+    public static func findFirstByRoles(_ element: AXUIElement, roles: Set<String>, maxDepth: Int = 6, currentDepth: Int = 0) -> AXUIElement? {
+        guard currentDepth <= maxDepth else { return nil }
+        if let r = role(element), roles.contains(r) { return element }
+        for child in children(element) {
+            if let f = findFirstByRoles(child, roles: roles, maxDepth: maxDepth, currentDepth: currentDepth + 1) { return f }
+        }
+        return nil
+    }
+    /// DFS first element with matching description (early exit).
+    public static func findFirstByDescription(_ element: AXUIElement, desc: String, maxDepth: Int = 4, currentDepth: Int = 0) -> AXUIElement? {
+        guard currentDepth <= maxDepth else { return nil }
+        let attrs = stringAttributes(element, [kAXRoleAttribute as String, kAXDescriptionAttribute as String])
+        if attrs[kAXDescriptionAttribute as String] == desc { return element }
+        for child in children(element) {
+            if let f = findFirstByDescription(child, desc: desc, maxDepth: maxDepth, currentDepth: currentDepth + 1) { return f }
+        }
+        return nil
+    }
+
+    /// All chat-list display names (AXStaticText id="_NS:40", legacy "_NS:18"), in row order. UI-only, read-only.
+    public static func chatRowNames(_ table: AXUIElement) -> [String] {
+        var names: [String] = []
+        for row in children(table) {
+            guard role(row) == "AXRow" else { continue }
+            for cell in children(row) {
+                guard role(cell) == "AXCell" else { continue }
+                for child in children(cell) {
+                    let attrs = stringAttributes(child, [kAXRoleAttribute as String, kAXIdentifierAttribute as String, kAXValueAttribute as String])
+                    if attrs[kAXRoleAttribute as String] == "AXStaticText" && ["_NS:18", "_NS:40"].contains(attrs[kAXIdentifierAttribute as String] ?? "") {
+                        names.append(attrs[kAXValueAttribute as String] ?? "")
+                    }
+                }
+            }
+        }
+        return names
+    }
+
     /// Find the AXRow in a chat list whose name label matches the given text.
-    /// KakaoTalk chat list: AXTable > AXRow > AXCell > AXStaticText(id="_NS:18")
+    /// KakaoTalk chat list: AXTable > AXRow > AXCell > AXStaticText(id="_NS:40", legacy "_NS:18")
+    /// Pass 1: exact / substring as before. Pass 2 (only when chatName has >=2
+    /// comma-separated tokens): a row matches only if EVERY token is present
+    /// in the row name (order-insensitive). That can never match a 1:1 room
+    /// for a multi-person request, because a 1:1 row contains only one name.
     public static func findChatRow(_ table: AXUIElement, chatName: String, exact: Bool = false) -> AXUIElement? {
         let start = Date()
         var scanned = 0
+        var rows: [(AXUIElement, String)] = []
         for row in children(table) {
             scanned += 1
             guard role(row) == "AXRow" else { continue }
@@ -215,14 +268,27 @@ public enum AXHelpers {
                 guard role(cell) == "AXCell" else { continue }
                 for child in children(cell) {
                     let attrs = stringAttributes(child, [kAXRoleAttribute as String, kAXIdentifierAttribute as String, kAXValueAttribute as String])
-                    if attrs[kAXRoleAttribute as String] == "AXStaticText" && attrs[kAXIdentifierAttribute as String] == "_NS:18" {
+                    if attrs[kAXRoleAttribute as String] == "AXStaticText" && ["_NS:18", "_NS:40"].contains(attrs[kAXIdentifierAttribute as String] ?? "") {
                         let name = attrs[kAXValueAttribute as String] ?? ""
+                        rows.append((row, name))
                         let matches = exact ? name == chatName : name.localizedCaseInsensitiveContains(chatName)
                         if matches {
                             fputs("[kakaocli] findChatRow: found after scanning \(scanned) rows in \(String(format: "%.2f", Date().timeIntervalSince(start)))s\n", stderr)
                             return row
                         }
                     }
+                }
+            }
+        }
+        if !exact {
+            let tokens = chatName.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            if tokens.count >= 2 {
+                let tokenMatches = rows.filter { (_, name) in tokens.allSatisfy { name.localizedCaseInsensitiveContains($0) } }
+                if tokenMatches.count == 1 {
+                    fputs("[kakaocli] findChatRow: token-match (all \(tokens.count) tokens, unique) found '\(tokenMatches[0].1)' after scanning \(scanned) rows\n", stderr)
+                    return tokenMatches[0].0
+                } else if tokenMatches.count > 1 {
+                    fputs("[kakaocli] findChatRow: token-match ambiguous (\(tokenMatches.count) rows) - refusing\n", stderr)
                 }
             }
         }
