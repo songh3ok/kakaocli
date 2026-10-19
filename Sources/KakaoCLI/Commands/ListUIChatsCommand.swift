@@ -20,7 +20,10 @@ struct ListUIChatsCommand: ParsableCommand {
             print("Could not find main window"); throw ExitCode.failure
         }
         if let q = search {
-            var fieldOpt = AXHelpers.findFirstByRoles(mainWindow, roles: ["AXTextField", "AXSearchField"], maxDepth: 4)
+            // SPEED: reuse the _NS:20 fast path (direct-child check) like
+            // the send path, instead of a depth-4 DFS over the whole window.
+            var fieldOpt = AXHelpers.findSearchField(mainWindow)
+                ?? AXHelpers.findFirstByRoles(mainWindow, roles: ["AXTextField", "AXSearchField"], maxDepth: 4)
             if fieldOpt == nil, let btn = AXHelpers.findFirstByDescription(mainWindow, desc: "검색", maxDepth: 3) {
                 _ = AXHelpers.performAction(btn, "AXPress")
                 _ = AXHelpers.poll(timeout: 1.5) {
@@ -31,8 +34,11 @@ struct ListUIChatsCommand: ParsableCommand {
             }
             if let field = fieldOpt {
                 print("search field found role=\(AXHelpers.role(field) ?? "?") id=\(AXHelpers.identifier(field) ?? "?")")
-                _ = AXHelpers.focus(field)
-                if !AXHelpers.setValue(field, q) { AXHelpers.clickElement(field); AXHelpers.typeText(q) }
+                // SPEED: skip focus/re-type when the field already holds q.
+                if AXHelpers.value(field) != q {
+                    _ = AXHelpers.focus(field)
+                    if !AXHelpers.setValue(field, q) { AXHelpers.clickElement(field); AXHelpers.typeText(q) }
+                } else { print("search field already holds query; not re-typing") }
                 if let tbl = AXHelpers.chatListTable(mainWindow) {
                     _ = AXHelpers.poll(timeout: 1.2) { AXHelpers.children(tbl).count < 200 }
                 }

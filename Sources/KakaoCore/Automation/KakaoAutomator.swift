@@ -19,14 +19,10 @@ public final class KakaoAutomator {
     /// verified input-field value.
     @discardableResult
     public func prepareMessage(to chatName: String, message: String, selfChat: Bool = false) throws -> String {
-        try sendOrPrepare(to: chatName, message: message, selfChat: selfChat, prepareOnly: true)
-        // Re-read the still-open chat window's input as proof.
-        let app = try AXHelpers.appElement(bundleId: Self.bundleId)
-        if let w = chatWindowElement(app, chatName: chatName, selfChat: selfChat),
-           let input = findInputField(in: w), let v = AXHelpers.value(input) {
-            return v
-        }
-        return message
+        // SPEED: sendOrPrepare already verified + returns the input value;
+        // the old code re-fetched app/windows/input and re-walked the chat
+        // window tree just to re-read the same value.
+        return try sendOrPrepare(to: chatName, message: message, selfChat: selfChat, prepareOnly: true)
     }
 
     /// Activate KakaoTalk, raise the prepared chat window, CLICK its message
@@ -61,8 +57,13 @@ public final class KakaoAutomator {
         // 2. Raise the prepared chat window, then find its input
         //    (AXTextArea desc "메시지 입력" / id _NS:51 via findInputField).
         _ = AXHelpers.performAction(w, kAXRaiseAction as String)
-        Thread.sleep(forTimeInterval: 0.1)
-        guard let input = findInputField(in: w) else { throw AutomationError.inputFieldNotFound }
+        // SPEED: no fixed 0.1s sleep after raise (AX raise is synchronous);
+        // find input immediately, with a short early-exit poll as fallback.
+        var foundInput = findInputField(in: w)
+        if foundInput == nil {
+            _ = AXHelpers.poll(timeout: 0.5) { foundInput = self.findInputField(in: w); return foundInput != nil }
+        }
+        guard let input = foundInput else { throw AutomationError.inputFieldNotFound }
         stage("raise+findInput")
         // 3. Pre-click exact-match check: refuse before touching anything.
         guard AXHelpers.value(input) == message else {
@@ -107,12 +108,18 @@ public final class KakaoAutomator {
     }
 
     private func chatWindowElement(_ app: AXUIElement, chatName: String, selfChat: Bool) -> AXUIElement? {
-        let wins = AXHelpers.windows(app).filter { AXHelpers.identifier($0) != "Main Window" }
-        if !selfChat, let exact = wins.first(where: { AXHelpers.title($0) == chatName }) { return exact }
-        return wins.first
+        // SPEED: identifier+title in ONE batched AX call per window
+        // (was 2 separate calls per window, on every poll iteration).
+        let wins: [(AXUIElement, String?)] = AXHelpers.windows(app).compactMap { w in
+            let a = AXHelpers.stringAttributes(w, [kAXIdentifierAttribute as String, kAXTitleAttribute as String])
+            return a[kAXIdentifierAttribute as String] == "Main Window" ? nil : (w, a[kAXTitleAttribute as String])
+        }
+        if !selfChat, let exact = wins.first(where: { $0.1 == chatName }) { return exact.0 }
+        return wins.first?.0
     }
 
-    private func sendOrPrepare(to chatName: String, message: String, selfChat: Bool = false, prepareOnly: Bool) throws {
+        @discardableResult
+    private func sendOrPrepare(to chatName: String, message: String, selfChat: Bool = false, prepareOnly: Bool) throws -> String {
         let sendStart = Date()
         func stage(_ name: String) {
             fputs("[kakaocli] stage=\(name) elapsed=\(String(format: "%.2f", Date().timeIntervalSince(sendStart)))s\n", stderr)
@@ -138,7 +145,13 @@ public final class KakaoAutomator {
             _ = AXHelpers.closeWindow(w)
         }
         if windows.count > 1 {
-            Thread.sleep(forTimeInterval: 0.3)
+            // SPEED: poll for the extra windows to actually go away
+            // (early exit) instead of a fixed 0.3s; cap is the old value.
+            _ = AXHelpers.poll(timeout: 0.3) {
+                AXHelpers.windows(app).allSatisfy {
+                    AXHelpers.stringAttributes($0, [kAXIdentifierAttribute as String])[kAXIdentifierAttribute as String] == "Main Window"
+                }
+            }
         }
 
         // 4. Ensure we're on the Chats tab.
@@ -152,7 +165,7 @@ public final class KakaoAutomator {
         if AXHelpers.chatListTable(mainWindow) == nil {
             if let chatroomsTab = AXHelpers.findFirst(mainWindow, role: "AXCheckBox", identifier: "chatrooms", maxDepth: 5) {
                 _ = AXHelpers.performAction(chatroomsTab, kAXPressAction as String)
-                Thread.sleep(forTimeInterval: 0.3)
+                _ = AXHelpers.poll(timeout: 0.3) { AXHelpers.chatListTable(mainWindow) != nil }
             }
         }
 
@@ -232,7 +245,7 @@ public final class KakaoAutomator {
         var opened = false
         if AXHelpers.selectRow(row, in: table) {
             _ = AXHelpers.focus(table)
-            Thread.sleep(forTimeInterval: 0.05)
+            Thread.sleep(forTimeInterval: 0.02)
             AXHelpers.pressKey(keyCode: 36) // Enter to open
             opened = AXHelpers.poll(timeout: 2.0) {
                 self.chatWindowElement(app, chatName: chatName, selfChat: selfChat) != nil
@@ -272,25 +285,24 @@ public final class KakaoAutomator {
 
         // 9. Focus and type the message
         _ = AXHelpers.performAction(chatWindow, kAXRaiseAction as String)
-        Thread.sleep(forTimeInterval: 0.1)
         AXHelpers.clickElement(inputField)
         // Proceed as soon as the input reports focus (fallback: short wait).
         if !AXHelpers.poll(timeout: 0.5, { AXHelpers.boolAttribute(inputField, kAXFocusedAttribute as String) == true }) {
-            Thread.sleep(forTimeInterval: 0.1)
+            Thread.sleep(forTimeInterval: 0.02)
         }
 
         // Type the message. setValue is preferred; if it does not stick
         // (readback empty/different), fall back to real keystrokes.
         var typedViaSetValue = AXHelpers.setValue(inputField, message)
         if typedViaSetValue {
-            Thread.sleep(forTimeInterval: 0.05)
+            Thread.sleep(forTimeInterval: 0.02)
             if AXHelpers.value(inputField) != message { typedViaSetValue = false }
         }
         if !typedViaSetValue {
             _ = AXHelpers.focus(inputField)
-            Thread.sleep(forTimeInterval: 0.05)
+            Thread.sleep(forTimeInterval: 0.02)
             AXHelpers.typeText(message)
-            Thread.sleep(forTimeInterval: 0.1)
+            Thread.sleep(forTimeInterval: 0.05)
         }
 
         if prepareOnly {
@@ -305,16 +317,18 @@ public final class KakaoAutomator {
                 _ = AXHelpers.setValue(inputField, "")
                 throw AutomationError.sendFailed("prepare failed: input value did not equal the message")
             }
-            return
+            return AXHelpers.value(inputField) ?? message
         }
 
         AXHelpers.pressKey(keyCode: 36) // Return key
         stage("typed+enter")
+        // (return value only meaningful for prepareOnly; see prepareMessage)
         // 10. Close the chat window
         Thread.sleep(forTimeInterval: 0.3)
         _ = AXHelpers.closeWindow(chatWindow)
         if let sf = searchField { _ = AXHelpers.setValue(sf, "") }
         stage("done")
+        return message
     }
 
     /// Find the message input AXTextArea in a chat window.
@@ -325,6 +339,19 @@ public final class KakaoAutomator {
     /// text area described "메시지 입력" / id _NS:51, then the old heuristic
     /// (top-level scroll area without a table), never a bubble in the table.
     private func findInputField(in window: AXUIElement) -> AXUIElement? {
+        // SPEED fast path: live structure is window > AXScrollArea(_NS:47) >
+        // AXTextArea(_NS:51, "메시지 입력"). Checking window children and
+        // their direct children first finds it in a handful of AX calls,
+        // instead of a DFS that also walks the (large) message-list table.
+        for child in AXHelpers.children(window) {
+            for sub in AXHelpers.children(child) {
+                let a = AXHelpers.stringAttributes(sub, [kAXRoleAttribute as String, kAXIdentifierAttribute as String, kAXDescriptionAttribute as String])
+                if a[kAXRoleAttribute as String] == "AXTextArea",
+                   a[kAXDescriptionAttribute as String] == "메시지 입력" || a[kAXIdentifierAttribute as String] == "_NS:51" {
+                    return sub
+                }
+            }
+        }
         if let byDesc = findInputDescendant(window, depth: 0) { return byDesc }
         for child in AXHelpers.children(window) {
             guard AXHelpers.role(child) == "AXScrollArea" else { continue }

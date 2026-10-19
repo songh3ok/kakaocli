@@ -17,8 +17,17 @@ public enum AXHelpers {
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first else {
             throw KakaoError.kakaoTalkNotInstalled
         }
+        // SPEED: was a fixed 0.3s sleep on every activation (the single
+        // largest fixed cost in focusPrepared: 0.35s stage). Poll with
+        // early exit instead: ready = isActive AND the AX window list is
+        // non-empty (isActive alone races the window list appearing -
+        // observed once as "Could not find main window" right after a
+        // fast activation). Cap 1.0s only ever bites when windows are
+        // genuinely not there yet; the warm path exits on the first check.
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        if app.isActive, !windows(axApp).isEmpty { return }
         app.activate()
-        Thread.sleep(forTimeInterval: 0.3)
+        _ = poll(timeout: 1.0, interval: 0.01) { app.isActive && !windows(axApp).isEmpty }
     }
 
     /// Get a string attribute from an AXUIElement.
@@ -204,7 +213,7 @@ public enum AXHelpers {
     }
 
     /// Poll `condition` every `interval` until true or `timeout`; early-exits as soon as ready.
-    public static func poll(timeout: TimeInterval, interval: TimeInterval = 0.05, _ condition: () -> Bool) -> Bool {
+    public static func poll(timeout: TimeInterval, interval: TimeInterval = 0.02, _ condition: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
             if condition() { return true }
@@ -251,10 +260,11 @@ public enum AXHelpers {
     /// All chat-list display names (AXStaticText id="_NS:40", legacy "_NS:18"), in row order. UI-only, read-only.
     public static func chatRowNames(_ table: AXUIElement) -> [String] {
         var names: [String] = []
+        // SPEED: no role(row)/role(cell) checks - each is an AX IPC round
+        // trip and the table>row>cell shape is fixed; the leaf check below
+        // (AXStaticText + _NS:40/_NS:18, batched) is the real filter.
         for row in children(table) {
-            guard role(row) == "AXRow" else { continue }
             for cell in children(row) {
-                guard role(cell) == "AXCell" else { continue }
                 for child in children(cell) {
                     let attrs = stringAttributes(child, [kAXRoleAttribute as String, kAXIdentifierAttribute as String, kAXValueAttribute as String])
                     if attrs[kAXRoleAttribute as String] == "AXStaticText" && ["_NS:18", "_NS:40"].contains(attrs[kAXIdentifierAttribute as String] ?? "") {
@@ -278,9 +288,8 @@ public enum AXHelpers {
         var rows: [(AXUIElement, String)] = []
         for row in children(table) {
             scanned += 1
-            guard role(row) == "AXRow" else { continue }
+            // SPEED: skip role(row)/role(cell) AX calls (see chatRowNames).
             for cell in children(row) {
-                guard role(cell) == "AXCell" else { continue }
                 for child in children(cell) {
                     let attrs = stringAttributes(child, [kAXRoleAttribute as String, kAXIdentifierAttribute as String, kAXValueAttribute as String])
                     if attrs[kAXRoleAttribute as String] == "AXStaticText" && ["_NS:18", "_NS:40"].contains(attrs[kAXIdentifierAttribute as String] ?? "") {
@@ -317,9 +326,8 @@ public enum AXHelpers {
         var scanned = 0
         for row in children(table) {
             scanned += 1
-            guard role(row) == "AXRow" else { continue }
+            // SPEED: skip role(row)/role(cell) AX calls (see chatRowNames).
             for cell in children(row) {
-                guard role(cell) == "AXCell" else { continue }
                 for child in children(cell) {
                     let attrs = stringAttributes(child, [kAXRoleAttribute as String, kAXDescriptionAttribute as String])
                     if attrs[kAXRoleAttribute as String] == "AXImage" {
@@ -452,7 +460,7 @@ public enum AXHelpers {
         if let mouseDown = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: center, mouseButton: .left),
            let mouseUp = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: center, mouseButton: .left) {
             mouseDown.post(tap: .cghidEventTap)
-            usleep(50000)
+            usleep(20000)
             mouseUp.post(tap: .cghidEventTap)
         }
     }
