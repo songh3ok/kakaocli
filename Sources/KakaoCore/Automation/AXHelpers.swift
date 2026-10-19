@@ -233,6 +233,21 @@ public enum AXHelpers {
         return nil
     }
 
+    /// Fast path for the Chats-tab search field: it is a direct child of the
+    /// main window, AXTextField id="_NS:20", already present whenever search
+    /// is active (and in recent KakaoTalk versions even before the magnifier
+    /// is pressed). Checking direct children + a bounded identifier search
+    /// avoids hunting/pressing the slow "검색" (magnifier) button, which is
+    /// only a fallback in KakaoAutomator when no field exists at all.
+    public static func findSearchField(_ window: AXUIElement) -> AXUIElement? {
+        for child in children(window) {
+            if identifier(child) == "_NS:20" { return child }
+        }
+        if let f = findFirst(window, role: "AXTextField", identifier: "_NS:20", maxDepth: 4) { return f }
+        if let f = findFirst(window, role: "AXSearchField", identifier: "_NS:20", maxDepth: 4) { return f }
+        return nil
+    }
+
     /// All chat-list display names (AXStaticText id="_NS:40", legacy "_NS:18"), in row order. UI-only, read-only.
     public static func chatRowNames(_ table: AXUIElement) -> [String] {
         var names: [String] = []
